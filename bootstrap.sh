@@ -4,13 +4,16 @@
 # Делает ровно то, без чего Ansible не дотянется до планшета, и так, как это
 # сделано руками на CF-20 и CF-33 (снято с обоих 2026-10-08): пользователи, вход
 # по SSH, сеть по Ethernet, имя хоста. Всё остальное — роли ansible/site.yml с
-# рабочей станции (инвариант №9): пакеты, конфиг, юниты, часовой пояс.
+# рабочей станции (инвариант №9): пакеты рантайма, конфиг, юниты, часовой пояс.
 #
 # Лежит в ansible/, а не в tools/: этот файл едет на планшет (инвариант №10).
 # Самодостаточный — ключ рабочей станции вписан ниже, сеть нужна только если
 # при установке не отметили OpenSSH. Запуск — на самом планшете, под root:
 #
-#   sudo bash bootstrap.sh
+#   sudo bash bootstrap.sh          prod — боевой планшет
+#   sudo bash bootstrap.sh --dev    dev — стенд, к которому ходит отладчик
+#
+# Профили различаются только пакетами (п. 1); всё остальное одинаково.
 #
 # Доставить — любым путём:
 #   wget https://raw.githubusercontent.com/ManZill/kiosk-setup/main/bootstrap.sh
@@ -23,7 +26,7 @@
 # изменённых файлов — в /root/bootstrap-backup-<время>/.
 #
 # Что делает, по порядку:
-#   1. openssh-server — если при установке его не отметили;
+#   1. пакеты — минимум для инструментов рабочей станции, по профилю;
 #   2. cloud-init выключается: иначе на загрузке он перепишет сеть и sshd;
 #   3. root — пароль (спросит, если не задан) и ключ рабочей станции;
 #   4. kiosk — создаётся, если его нет; ключ; sudo снимается;
@@ -34,6 +37,7 @@
 # сделано.
 #
 # Ключи:
+#   --dev | --prod     профиль; умолчание prod
 #   --hostname ИМЯ     имя хоста; умолчание kiosk — как у CF-20 и CF-33
 #   --key 'ssh-… …'    ещё один открытый ключ для root и kiosk; можно несколько раз
 #   --passwords        спросить пароли root и kiosk, даже если они уже заданы
@@ -56,6 +60,7 @@ KEYS=(
     'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGFVGhWxTmf1H7ymvidClwHwmTMZur1OUFLdG+aAWdKV tauruna@wsl → kiosk CF-33'
 )
 
+PROFILE=prod
 NAME_HOST=kiosk
 ASK_PASSWORDS=0
 DO_NETWORK=1
@@ -66,6 +71,8 @@ die()  { printf '\nОШИБКА: %s\n' "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --dev)        PROFILE=dev ;;
+        --prod)       PROFILE=prod ;;
         --hostname)   NAME_HOST="${2:?--hostname требует имя}"; shift ;;
         --key)        KEYS+=("${2:?--key требует открытый ключ одной строкой}"); shift ;;
         --passwords)  ASK_PASSWORDS=1 ;;
@@ -177,17 +184,35 @@ note "система: ${PRETTY_NAME:-?}, ядро $(uname -r)"
 note "адреса сейчас:"
 ip -br -4 addr show | grep -v '^lo ' | sed 's/^/     /' || true
 
-# --- 1. openssh-server ---------------------------------------------------------
+# --- 1. пакеты -----------------------------------------------------------------
 
-say "1. OpenSSH"
-if dpkg-query -W -f='${Status}' openssh-server 2>/dev/null | grep 'install ok installed' > /dev/null; then
-    note "openssh-server уже стоит"
+say "1. Пакеты, профиль $PROFILE"
+# Только то, без чего не работают инструменты рабочей станции, — остальное ставят
+# роли Ansible. Минимальная установка («minimized», так стоит cf20-02) не ставит
+# даже rsync и ping: на CF-20 и CF-33 они пришли с ubuntu-server и ubuntu-standard.
+# python3 для Ansible и perf (tools/device.sh perf) есть и в минимальной.
+#   prod: openssh-server — вход; rsync — им копируют tools/deploy-deb.sh и
+#         tools/deploy.sh --sensord, а rsync нужен на обоих концах.
+#   dev:  gdb — его запускает на планшете F5 из студии (launch.vs.json);
+#         iputils-ping, tcpdump — проверки по RUNBOOK и связи master и slave
+#         (ADR-0049).
+PKGS=(openssh-server rsync)
+if [ "$PROFILE" = dev ]; then PKGS+=(gdb iputils-ping tcpdump); fi
+missing=()
+for p in "${PKGS[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep 'install ok installed' > /dev/null; then
+        missing+=("$p")
+    fi
+done
+if [ ${#missing[@]} -eq 0 ]; then
+    note "всё уже стоит: ${PKGS[*]}"
 else
-    note "ставлю openssh-server (нужен доступ к архиву Ubuntu)"
+    note "ставлю: ${missing[*]} (нужен доступ к архиву Ubuntu)"
     # stdin — /dev/null: при запуске «curl … | sudo bash» скрипт приходит по
-    # stdin, и apt или debconf съели бы его остаток.
+    # stdin, и apt или debconf съели бы его остаток. Без рекомендованных — минимум.
     apt-get update -q < /dev/null
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -q openssh-server < /dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+        "${missing[@]}" < /dev/null
 fi
 # В 24.04 sshd поднимается сокетом. Не включено ни то, ни другое — после
 # перезагрузки входа не будет вовсе.
@@ -397,7 +422,7 @@ fi
 # --- итог ----------------------------------------------------------------------
 
 addr=$(ip -4 -o addr show scope global | awk '$2 ~ /^en/ {sub(/\/.*/, "", $4); print $4; exit}')
-say "Готово"
+say "Готово, профиль $PROFILE"
 if [ -d "$BACKUP" ]; then note "прежние версии файлов — $BACKUP"; fi
 cat <<EOF
 
