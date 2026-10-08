@@ -13,9 +13,11 @@
 #   sudo bash bootstrap.sh
 #
 # Доставить — любым путём:
+#   wget https://raw.githubusercontent.com/ManZill/kiosk-setup/main/bootstrap.sh
 #   scp ansible/bootstrap.sh <пользователь установщика>@<адрес>:   с рабочей станции
 #   флешка
-#   curl -fsSLO <ссылка на файл>                                     когда будет откуда
+# github.com/ManZill/kiosk-setup — публичная КОПИЯ этого файла, чтобы планшет мог
+# скачать его сам. Правится здесь; после правки — скопировать туда и запушить.
 #
 # Повторный запуск безопасен: что уже как надо, не трогается. Прежние версии
 # изменённых файлов — в /root/bootstrap-backup-<время>/.
